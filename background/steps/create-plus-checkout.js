@@ -10,8 +10,8 @@
   const PLUS_PAYMENT_METHOD_GOPAY = 'gopay';
   const PLUS_PAYMENT_METHOD_GPC_HELPER = 'gpc-helper';
   const DEFAULT_GPC_HELPER_API_URL = 'https://your-gpc-helper-domain.example';
-  const BUILTIN_PLUS_CHECKOUT_CLOUD_CONVERSION_API_URL = 'https://gujumpgate.zg.fyi/api/checkout';
-  const BUILTIN_PLUS_CHECKOUT_CLOUD_CONVERSION_API_KEY = '2KwVxE6f0ABH002JLkoQJ9ReRf4_d01y';
+  const BUILTIN_PLUS_CHECKOUT_CLOUD_CONVERSION_API_URL = 'https://payurl.ark2.cn/api/checkout';
+  const BUILTIN_PLUS_CHECKOUT_CLOUD_CONVERSION_API_KEY = '';
   const GPC_HELPER_PHONE_MODE_AUTO = 'auto';
   const GPC_HELPER_PHONE_MODE_MANUAL = 'manual';
   const CHECKOUT_READY_URL_PATTERN = /^https:\/\/(?:chatgpt\.com\/checkout|pay\.openai\.com\/c\/pay|checkout\.stripe\.com\/c\/pay)(?:\/|$)/i;
@@ -2132,61 +2132,93 @@ function FindProxyForURL(url, host) {
         headers['X-API-Key'] = apiKey;
       }
 
-      const { response, data } = await fetchJsonWithTimeout(apiUrl, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify({
-          accessToken: token,
-          paymentMethod: normalizePlusPaymentMethod(paymentMethod),
-          country: billingDetails.country,
-          currency: billingDetails.currency,
-        }),
-      }, 45000);
+      const CLOUD_CHECKOUT_MAX_ATTEMPTS = 3;
+      const CLOUD_CHECKOUT_RETRY_DELAYS_MS = [3000, 6000];
+      let lastAttemptError = null;
 
-      const targetCheckoutUrl = String(
-        data?.preferredCheckoutUrl
-        || data?.hostedCheckoutUrl
-        || data?.convertedCheckoutUrl
-        || data?.chatgptCheckoutUrl
-        || data?.checkoutUrl
-        || ''
-      ).trim();
-      if (!response?.ok || !targetCheckoutUrl) {
-        const detail = formatCloudCheckoutErrorDetail(
-          data?.detail || data?.message || data?.error || data,
-          `HTTP ${response?.status || 0}`
-        );
-        if (isCloudCheckoutAlreadyPaidMessage(detail)) {
+      for (let attempt = 1; attempt <= CLOUD_CHECKOUT_MAX_ATTEMPTS; attempt += 1) {
+        throwIfStopped();
+        try {
+          const { response, data } = await fetchJsonWithTimeout(apiUrl, {
+            method: 'POST',
+            headers,
+            body: JSON.stringify({
+              token,
+              plan: 'plus',
+              checkout_ui_mode: 'hosted',
+              ui_language: 'en',
+              country: billingDetails.country,
+              currency: billingDetails.currency,
+              proxy: '',
+              use_promo: true,
+              promo_code: 'STRIPEATLASGPT4BIZ050126',
+              workspace_name: 'linux-do',
+              seat_quantity: 2,
+            }),
+          }, 45000);
+
+          const targetCheckoutUrl = String(
+            data?.openai_payurl
+            || data?.preferredCheckoutUrl
+            || data?.hostedCheckoutUrl
+            || data?.convertedCheckoutUrl
+            || data?.chatgptCheckoutUrl
+            || data?.url
+            || data?.checkoutUrl
+            || ''
+          ).trim();
+          if (!response?.ok || !targetCheckoutUrl) {
+            const detail = formatCloudCheckoutErrorDetail(
+              data?.detail || data?.message || data?.error || data,
+              `HTTP ${response?.status || 0}`
+            );
+            if (isCloudCheckoutAlreadyPaidMessage(detail)) {
+              return {
+                checkoutUrl: '',
+                chatgptCheckoutUrl: '',
+                checkoutSessionId: String(data?.checkout_session_id || data?.checkoutSessionId || '').trim(),
+                processorEntity: String(data?.processor_entity || data?.processorEntity || '').trim(),
+                hostedCheckoutUrl: '',
+                convertedCheckoutUrl: '',
+                preferredCheckoutUrl: '',
+                country: String(data?.country || billingDetails.country).trim() || billingDetails.country,
+                currency: String(data?.currency || billingDetails.currency).trim() || billingDetails.currency,
+                checkoutSource: CLOUD_CHECKOUT_ALREADY_PAID_SOURCE,
+                alreadyPaid: true,
+                alreadyPaidDetail: detail,
+              };
+            }
+            throw new Error(`步骤 6：云端支付转换失败：${detail}`);
+          }
+
           return {
-            checkoutUrl: '',
-            chatgptCheckoutUrl: '',
-            checkoutSessionId: String(data?.checkoutSessionId || '').trim(),
-            processorEntity: String(data?.processorEntity || '').trim(),
-            hostedCheckoutUrl: '',
-            convertedCheckoutUrl: '',
-            preferredCheckoutUrl: '',
+            checkoutUrl: String(data?.chatgpt_checkout_url || data?.checkoutUrl || '').trim(),
+            chatgptCheckoutUrl: String(data?.chatgpt_checkout_url || data?.chatgptCheckoutUrl || '').trim(),
+            checkoutSessionId: String(data?.checkout_session_id || data?.checkoutSessionId || '').trim(),
+            processorEntity: String(data?.processor_entity || data?.processorEntity || '').trim(),
+            hostedCheckoutUrl: String(data?.openai_payurl || data?.hostedCheckoutUrl || '').trim(),
+            convertedCheckoutUrl: String(data?.chatgpt_checkout_url || data?.chatgptCheckoutUrl || data?.convertedCheckoutUrl || '').trim(),
+            preferredCheckoutUrl: targetCheckoutUrl,
             country: String(data?.country || billingDetails.country).trim() || billingDetails.country,
             currency: String(data?.currency || billingDetails.currency).trim() || billingDetails.currency,
-            checkoutSource: CLOUD_CHECKOUT_ALREADY_PAID_SOURCE,
-            alreadyPaid: true,
-            alreadyPaidDetail: detail,
+            checkoutSource: 'cloud-converted-checkout',
           };
+        } catch (error) {
+          lastAttemptError = error;
+          if (isCloudCheckoutAlreadyPaidMessage(error?.message)) {
+            throw error;
+          }
+          if (attempt < CLOUD_CHECKOUT_MAX_ATTEMPTS) {
+            const delayMs = CLOUD_CHECKOUT_RETRY_DELAYS_MS[attempt - 1] || 5000;
+            await addLog(
+              `步骤 6：云端支付转换第 ${attempt}/${CLOUD_CHECKOUT_MAX_ATTEMPTS} 次失败：${error?.message || error}，${Math.round(delayMs / 1000)} 秒后重试...`,
+              'warn'
+            );
+            await sleepWithStop(delayMs);
+          }
         }
-        throw new Error(`步骤 6：云端支付转换失败：${detail}`);
       }
-
-      return {
-        checkoutUrl: String(data?.checkoutUrl || '').trim(),
-        chatgptCheckoutUrl: String(data?.chatgptCheckoutUrl || '').trim(),
-        checkoutSessionId: String(data?.checkoutSessionId || '').trim(),
-        processorEntity: String(data?.processorEntity || '').trim(),
-        hostedCheckoutUrl: String(data?.hostedCheckoutUrl || '').trim(),
-        convertedCheckoutUrl: String(data?.chatgptCheckoutUrl || data?.convertedCheckoutUrl || '').trim(),
-        preferredCheckoutUrl: targetCheckoutUrl,
-        country: String(data?.country || billingDetails.country).trim() || billingDetails.country,
-        currency: String(data?.currency || billingDetails.currency).trim() || billingDetails.currency,
-        checkoutSource: 'cloud-converted-checkout',
-      };
+      throw lastAttemptError || new Error('步骤 6：云端支付转换多次重试后仍然失败。');
     }
 
     async function generateGpcCheckoutFromApi(accessToken = '', state = {}) {
