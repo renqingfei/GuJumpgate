@@ -2364,10 +2364,11 @@ function FindProxyForURL(url, host) {
           logMessage: '步骤 6：正在等待 ChatGPT 页面完成加载，再继续创建订阅页...',
         });
 
-        const useCloudCheckoutConversion = isPlusCheckoutCloudConversionEnabled(state, paymentMethod);
+        const useCloudCheckoutConversion = normalizePlusPaymentMethod(paymentMethod) === PLUS_PAYMENT_METHOD_PAYPAL
+          || isPlusCheckoutCloudConversionEnabled(state, paymentMethod);
         let result = null;
         if (useCloudCheckoutConversion) {
-          await addLog('步骤 6：已启用云端支付转换，正在读取 accessToken 并请求云端服务生成订阅链接...', 'info');
+          await addLog('步骤 6：正在读取 accessToken 并请求云端服务生成订阅链接...', 'info');
           const accessToken = await readAccessTokenFromChatGptSessionTab(tabId);
           if (!accessToken) {
             throw new Error('步骤 6：云端支付转换未获取到可用 accessToken。');
